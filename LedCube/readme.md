@@ -1,4 +1,5 @@
 # [Source Code](led_cube.ino)
-# [States table](switchingTable.xlsx)
+# [Preview switching table](previewSwitchingTable.png)
+# [Switching table](switchingTable.xlsx)
 # [Scheme](scheme.jpg)
 # [Video Demonstration](https://www.youtube.com/watch?v=ahYkLvJmULM)
