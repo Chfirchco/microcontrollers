@@ -1,4 +1,3 @@
-// mqtt_connect.h
 #ifndef MQTT_CONNECT_H
 #define MQTT_CONNECT_H
 
@@ -13,7 +12,7 @@ PubSubClient client(espClient);
 
 void MQTTcallback(char* topic, byte* payload, unsigned int length);
 
-void setupMQTT() {
+void setupMQTT(String topics[]) {
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(MQTTcallback);
 
@@ -21,10 +20,9 @@ void setupMQTT() {
     Serial.println("Connecting to MQTT...");
     if (client.connect("ESP8266")) {
       Serial.println("connected");
-      client.subscribe("esp_counter/max_people");
-      client.subscribe("esp_counter/alarm");
-      client.subscribe("esp_counter/clear_logs");
-      client.subscribe("esp_counter/clear_counters");
+      for (int i = 0; i < 4; ++i) {
+        client.subscribe(topics[i].c_str());
+      }
     } else {
       Serial.print("failed with state ");
       Serial.println(client.state());
