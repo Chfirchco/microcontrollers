@@ -96,6 +96,20 @@ void setup() {
     // Load saved variables
     loadVariables();
 
+    // Validate loaded variables
+    if (currentPeople < 0 || currentPeople > 10000) { // Assuming 10000 is a reasonable upper limit
+        currentPeople = 0;
+    }
+    if (maxPeople <= 0 || maxPeople > 1000) { // Assuming 1000 is a reasonable upper limit
+        maxPeople = 10;
+    }
+    if (dailyPeople < 0 || dailyPeople > 10000) { // Assuming 10000 is a reasonable upper limit
+        dailyPeople = 0;
+    }
+
+    // Save validated variables back to EEPROM
+    saveVariables();
+
     // Attempt to reconnect to saved Wi-Fi credentials
     reconnectWiFi();
 
@@ -119,19 +133,12 @@ void setup() {
     calibrateDistance();
 }
 
+
 void loop() {
     timeClient.update();
     setTime(timeClient.getEpochTime());
     // MQTT loop
     client.loop();
-
-    // Publish MQTT messages
-    unsigned long pub_currentMillis = millis();
-    if (pub_currentMillis - pub_previousMillis >= publish_interval) {
-        pub_previousMillis = pub_currentMillis;
-        client.publish("esp_counter/current_people", ("Текущее количество людей: " + String(currentPeople)).c_str());
-        client.publish("esp_counter/all_people", String(dailyPeople).c_str());
-    }
 
     // Distance sensor 1 measurement
     unsigned long currentMillisDistance = millis();
@@ -154,14 +161,14 @@ void loop() {
         if (sensor1Val < sensor1Initial - 15 && !prevInblocked) {
             sequence += "1";
             prevInblocked = true;
-            Serial.println(sequence);
+            Serial.println("Sequence updated: " + sequence);
         } else if (sensor1Val >= sensor1Initial - 15) {
             prevInblocked = false;
         }
         if (sensor2Val < sensor2Initial - 15 && !prevOutblocked) {
             sequence += "2";
             prevOutblocked = true;
-            Serial.println(sequence);
+            Serial.println("Sequence updated: " + sequence);
         } else if (sensor2Val >= sensor2Initial - 15) {
             prevOutblocked = false;
         }
@@ -174,11 +181,13 @@ void loop() {
         dailyPeople++;
         saveVariables();
         logPeopleCountChange(currentPeople); // Log the change
+        Serial.println("Person entered, currentPeople: " + String(currentPeople));
     } else if (sequence.equals("21") && currentPeople > 0) {
         currentPeople--;
         sequence = "";
         saveVariables();
         logPeopleCountChange(currentPeople); // Log the change
+        Serial.println("Person exited, currentPeople: " + String(currentPeople));
     }
 
     // Handle sequence timeout
@@ -221,77 +230,114 @@ void loop() {
         }
         Serial.println("Reconnected to WiFi.");
     }
+    unsigned long pub_currentMillis = millis();
+    if (pub_currentMillis - pub_previousMillis >= publish_interval) {
+        pub_previousMillis = pub_currentMillis;
+        publishMQTTMessages();
+    }
 }
-
+// Function to publish MQTT messages
+void publishMQTTMessages() {
+    String topics[6];
+    loadTopics(topics);  // Load topics from EEPROM
+        for (int i = 0; i < 6; i++) {
+        Serial.print("Topic ");
+        Serial.print(i);
+        Serial.print(": ");
+        Serial.println(topics[i]);
+    }
+    // Publish MQTT messages
+    client.publish(topics[4].c_str(), (String(currentPeople)).c_str());
+    client.publish(topics[5].c_str(), String(dailyPeople).c_str());
+}
 void MQTTcallback(char* topic, byte* payload, unsigned int length) {
+    String topicStr(topic);
+    String topics[6];
+    loadTopics(topics);  // Load topics from EEPROM
+
     Serial.print("Message received in topic: ");
-    Serial.println(topic);
+    Serial.println(topicStr);
 
-    if (String(topic) == "esp_counter/max_people") {
-        bool isNumeric = true;
-        for (int i = 0; i < length; i++) {
-            if (!isdigit(payload[i])) {
-                isNumeric = false;
-                break;
-            }
-        }
+    if (topicStr == topics[0]) {
+        handleMaxPeople(payload, length);
+    } else if (topicStr == topics[1]) {
+        handleAlarm(payload, length);
+    } else if (topicStr == topics[2]) {
+        handleClearLogs(payload, length);
+    } else if (topicStr == topics[3]) {
+        handleClearCounters(payload, length);
+    } 
 
-        if (isNumeric) {
-            String message;
-            for (int i = 0; i < length; i++) {
-                message += (char)payload[i];
-            }
-            int newValue = message.toInt();
-            maxPeople = newValue;
-            Serial.print("Updated maxPeople to: ");
-            Serial.println(maxPeople);
-            saveVariables();
-        } else {
-            String message;
-            for (int i = 0; i < length; i++) {
-                message += (char)payload[i];
-            }
-            Serial.println("Non-numeric message received: " + message);
-        }
-    } else if (String(topic) == "esp_counter/alarm") {
-        String message;
-        for (int i = 0; i < length; i++) {
-            message += (char)payload[i];
-        }
-        if (message == "on") {
-            buzzerOn();
-        } else if (message == "off") {
-            noTone(BUZZER_IN);
-        }
-        Serial.print("Message: ");
-        Serial.print(message);
-    }
-    else if (String(topic) == "esp_counter/clear_logs") {
-        String message;
-        for (int i = 0; i < length; i++) {
-            message += (char)payload[i];
-            Serial.println(message);
-        }
-        if (message == "clear") {
-            clearLogs();
-        } else {
-            Serial.println("Invalid message for clearing logs");
-        }
-    }
-    else if (String(topic) == "esp_counter/clear_counters") {
-        String message;
-        for (int i = 0; i < length; i++) {
-            message += (char)payload[i];
-        }
-        if (message == "clear") {
-            clearCounters();
-        } else {
-            Serial.println("Invalid message for clearing counters");
-        }
-    }
-    Serial.println();
     Serial.println("-----------------------");
 }
+
+
+void handleMaxPeople(byte* payload, unsigned int length) {
+    bool isNumeric = true;
+    for (int i = 0; i < length; i++) {
+        if (!isdigit(payload[i])) {
+            isNumeric = false;
+            break;
+        }
+    }
+
+    if (isNumeric) {
+        String message;
+        for (int i = 0; i < length; i++) {
+            message += (char)payload[i];
+        }
+        int newValue = message.toInt();
+        maxPeople = newValue;
+        Serial.print("Updated maxPeople to: ");
+        Serial.println(maxPeople);
+        saveVariables();
+    } else {
+        String message;
+        for (int i = 0; i < length; i++) {
+            message += (char)payload[i];
+        }
+        Serial.println("Non-numeric message received: " + message);
+    }
+}
+
+void handleAlarm(byte* payload, unsigned int length) {
+    String message;
+    for (int i = 0; i < length; i++) {
+        message += (char)payload[i];
+    }
+    if (message == "on") {
+        buzzerOn();
+    } else if (message == "off") {
+        noTone(BUZZER_IN);
+    }
+    Serial.print("Message: ");
+    Serial.print(message);
+}
+
+void handleClearLogs(byte* payload, unsigned int length) {
+    String message;
+    for (int i = 0; i < length; i++) {
+        message += (char)payload[i];
+    }
+    if (message == "clear") {
+        clearLogs();
+    } else {
+        Serial.println("Invalid message for clearing logs");
+    }
+}
+
+void handleClearCounters(byte* payload, unsigned int length) {
+    String message;
+    for (int i = 0; i < length; i++) {
+        message += (char)payload[i];
+    }
+    if (message == "clear") {
+        clearCounters();
+    } else {
+        Serial.println("Invalid message for clearing counters");
+    }
+}
+
 
 
 void clearLogs() {
@@ -370,7 +416,15 @@ void saveVariables() {
     EEPROM.put(EEPROM_MAX_PEOPLE_ADDR, maxPeople);
     EEPROM.put(EEPROM_DAILY_PEOPLE_ADDR, dailyPeople);
     EEPROM.commit();
+    Serial.println("Variables saved to EEPROM");
+    Serial.print("currentPeople: ");
+    Serial.println(currentPeople);
+    Serial.print("maxPeople: ");
+    Serial.println(maxPeople);
+    Serial.print("dailyPeople: ");
+    Serial.println(dailyPeople);
 }
+
 
 void loadVariables() {
     EEPROM.get(EEPROM_CURRENT_PEOPLE_ADDR, currentPeople);
@@ -381,7 +435,16 @@ void loadVariables() {
     if (currentPeople < 0) currentPeople = 0;
     if (maxPeople <= 0) maxPeople = 10;
     if (dailyPeople < 0) dailyPeople = 0;
+
+    // Debug prints
+    Serial.print("Loaded currentPeople: ");
+    Serial.println(currentPeople);
+    Serial.print("Loaded maxPeople: ");
+    Serial.println(maxPeople);
+    Serial.print("Loaded dailyPeople: ");
+    Serial.println(dailyPeople);
 }
+
 
 void logPeopleCountChange(int peopleCount) {
     File file = LittleFS.open("/logs.json", "a");
@@ -409,4 +472,15 @@ void logPeopleCountChange(int peopleCount) {
     }
 
     file.close();
+}
+void loadTopics(String topics[]) {
+    char topicArr[6][MAX_TOPIC_LENGTH];
+    
+    EEPROM.begin(EEPROM_SIZE);
+    for (int i = 0; i < 6; ++i) {
+        for (int j = 0; j < MAX_TOPIC_LENGTH; ++j) {
+            topicArr[i][j] = EEPROM.read(TOPIC_BASE_ADDR + i * MAX_TOPIC_LENGTH + j);
+        }
+        topics[i] = String(topicArr[i]);
+    }
 }
