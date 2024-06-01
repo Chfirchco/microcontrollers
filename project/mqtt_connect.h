@@ -15,13 +15,14 @@ void MQTTcallback(char* topic, byte* payload, unsigned int length);
 void setupMQTT(String topics[]) {
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(MQTTcallback);
-
+  
   while (!client.connected()) {
     Serial.println("Connecting to MQTT...");
     if (client.connect("ESP8266")) {
       Serial.println("connected");
       for (int i = 0; i < 4; ++i) {
         client.subscribe(topics[i].c_str());
+        Serial.println(topics[i]);
       }
     } else {
       Serial.print("failed with state ");

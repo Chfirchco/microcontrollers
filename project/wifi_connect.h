@@ -3,7 +3,6 @@
 
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
-#include <EEPROM.h>
 #include "mqtt_connect.h"
 #include <ArduinoJson.h>
 #include <FS.h>
@@ -12,113 +11,220 @@
 bool wifiConnected = false;
 ESP8266WebServer server(80);
 
-#define EEPROM_SIZE 512  // Увеличим размер EEPROM для хранения новых данных
-#define SSID_ADDR 0
-#define PASSWORD_ADDR 32
-#define MAX_SSID_LENGTH 32
-#define MAX_PASSWORD_LENGTH 64
+#define CONFIG_FILE "/config.json"
 
-#define TOPIC_BASE_ADDR 96
-#define TOPIC_MAX_PEOPLE_ADDR (TOPIC_BASE_ADDR + 32)
-#define TOPIC_ALARM_ADDR (TOPIC_MAX_PEOPLE_ADDR + 32)
-#define TOPIC_CLEAR_LOGS_ADDR (TOPIC_ALARM_ADDR + 32)
-#define TOPIC_CLEAR_COUNTERS_ADDR (TOPIC_CLEAR_LOGS_ADDR + 32)
-#define TOPIC_CURRENT_PEOPLE_ADDR (TOPIC_CLEAR_COUNTERS_ADDR + 32)
-#define TOPIC_TOTAL_PEOPLE_ADDR (TOPIC_CURRENT_PEOPLE_ADDR + 32)
-#define MAX_TOPIC_LENGTH 32
+String loginForm = "<!DOCTYPE html>\
+<html>\
+<head>\
+  <title>WiFi Configuration</title>\
+  <style>\
+    body {\
+      font-family: Arial, sans-serif;\
+      display: flex;\
+      justify-content: center;\
+      align-items: center;\
+      height: 100vh;\
+      margin: 0;\
+      background-color: #f2f2f2;\
+    }\
+    .container {\
+      background-color: #fff;\
+      padding: 20px;\
+      border-radius: 8px;\
+      box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);\
+      width: 300px;\
+    }\
+    h2 {\
+      text-align: center;\
+      margin-bottom: 20px;\
+    }\
+    label {\
+      display: block;\
+      margin: 10px 0 5px;\
+    }\
+    input[type='text'], input[type='password'] {\
+      width: 100%;\
+      padding: 8px;\
+      box-sizing: border-box;\
+      border: 1px solid #ccc;\
+      border-radius: 4px;\
+    }\
+    input[type='submit'] {\
+      width: 100%;\
+      padding: 10px;\
+      background-color: #4CAF50;\
+      color: white;\
+      border: none;\
+      border-radius: 4px;\
+      cursor: pointer;\
+      margin-top: 20px;\
+    }\
+    input[type='submit']:hover {\
+      background-color: #45a049;\
+    }\
+    .mac-address {\
+      text-align: center;\
+      margin-top: 10px;\
+      font-size: 12px;\
+      color: #555;\
+    }\
+  </style>\
+</head>\
+<body>\
+  <div class='container'>\
+    <h2>Configuration</h2>\
+    <form action='/login' method='post'>\
+      <label for='ssid'>SSID:</label>\
+      <input type='text' id='ssid' name='ssid' placeholder='Enter SSID'>\
+      <label for='password'>Password:</label>\
+      <input type='password' id='password' name='password' placeholder='Enter Password'>\
+      <label for='topicMaxPeople'>Topic Max People:</label>\
+      <input type='text' id='topicMaxPeople' name='topicMaxPeople' value='max_people'>\
+      <label for='topicAlarm'>Topic Alarm:</label>\
+      <input type='text' id='topicAlarm' name='topicAlarm' value='alarm'>\
+      <label for='topicClearLogs'>Topic Clear Logs:</label>\
+      <input type='text' id='topicClearLogs' name='topicClearLogs' value='clear_logs'>\
+      <label for='topicClearCounters'>Topic Clear Counters:</label>\
+      <input type='text' id='topicClearCounters' name='topicClearCounters' value='clear_counters'>\
+      <label for='topicCurrentPeople'>Topic Current People:</label>\
+      <input type='text' id='topicCurrentPeople' name='topicCurrentPeople' value='current_people'>\
+      <label for='topicTotalPeople'>Topic Total People:</label>\
+      <input type='text' id='topicTotalPeople' name='topicTotalPeople' value='total_people'>\
+      <input type='submit' value='Submit'>\
+    </form>\
+    <form action='/download' method='get'>\
+      <input type='submit' value='Download logs'>\
+    </form>\
+    <div class='mac-address'>MAC Address: <span id='macAddress'></span></div>\
+  </div>\
+  <script>\
+    document.getElementById('macAddress').innerText = '" + WiFi.macAddress() + "';\
+  </script>\
+</body>\
+</html>";
 
-String loginForm = "<form action='/login' method='post'>\
-                      <label for='ssid'>SSID:</label><br>\
-                      <input type='text' id='ssid' name='ssid'><br>\
-                      <label for='password'>Password:</label><br>\
-                      <input type='password' id='password' name='password'><br>\
-                      <label for='topicMaxPeople'>topicMaxPeople:</label><br>\
-                      <input type='text' id='topicMaxPeople' name='topicMaxPeople'><br>\
-                      <label for='topicAlarm'>topicAlarm:</label><br>\
-                      <input type='text' id='topicAlarm' name='topicAlarm'><br>\
-                      <label for='topicClearLogs'>topicClearLogs:</label><br>\
-                      <input type='text' id='topicClearLogs' name='topicClearLogs'><br>\
-                      <label for='topicClearCounters'>topicClearCounters:</label><br>\
-                      <input type='text' id='topicClearCounters' name='topicClearCounters'><br>\
-                      <label for='topicCurrentPeople'>topicCurrentPeople:</label><br>\
-                      <input type='text' id='topicCurrentPeople' name='topicCurrentPeople'><br>\
-                      <label for='topicTotalPeople'>topicTotalPeople:</label><br>\
-                      <input type='text' id='topicTotalPeople' name='topicTotalPeople'><br>\
-                      <input type='submit' value='Submit'>\
-                    </form>\
-                    <form action='/download' method='get'>\
-                      <input type='submit' value='Download logs'>\
-                    </form>";
 
-// Function to save Wi-Fi credentials and topics to EEPROM
-void saveCredentialsAndTopics(const String& ssid, const String& password, const String topics[]) {
-    EEPROM.begin(EEPROM_SIZE);
-    for (int i = 0; i < MAX_SSID_LENGTH; ++i) {
-        EEPROM.write(SSID_ADDR + i, i < ssid.length() ? ssid[i] : 0);
-    }
-    for (int i = 0; i < MAX_PASSWORD_LENGTH; ++i) {
-        EEPROM.write(PASSWORD_ADDR + i, i < password.length() ? password[i] : 0);
-    }
+String logsPage = "<!DOCTYPE html>\
+<html>\
+<head>\
+  <title>Logs</title>\
+  <style>\
+    body {\
+      font-family: Arial, sans-serif;\
+      display: flex;\
+      justify-content: center;\
+      align-items: center;\
+      height: 100vh;\
+      margin: 0;\
+      background-color: #f2f2f2;\
+    }\
+    .container {\
+      background-color: #fff;\
+      padding: 20px;\
+      border-radius: 8px;\
+      box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);\
+      width: 600px;\
+      max-height: 80vh;\
+      overflow-y: auto;\
+    }\
+    h2 {\
+      text-align: center;\
+      margin-bottom: 20px;\
+    }\
+    pre {\
+      background-color: #f8f8f8;\
+      padding: 10px;\
+      border-radius: 4px;\
+      overflow-x: auto;\
+      white-space: pre-wrap;\
+      word-wrap: break-word;\
+      border: 1px solid #ccc;\
+    }\
+  </style>\
+</head>\
+<body>\
+  <div class='container'>\
+    <h2>Logs</h2>\
+    <pre id='logContent'></pre>\
+  </div>\
+  <script>\
+    fetch('/download').then(response => response.json()).then(data => {\
+      document.getElementById('logContent').innerText = JSON.stringify(data, null, 2);\
+    }).catch(error => {\
+      document.getElementById('logContent').innerText = 'Error loading logs: ' + error;\
+    });\
+  </script>\
+</body>\
+</html>";
+
+// Function to save Wi-Fi credentials and topics to a JSON file
+bool saveConfig(const String& ssid, const String& password, const String topics[]) {
+    DynamicJsonDocument doc(1024);
+    doc["ssid"] = ssid;
+    doc["password"] = password;
+
+    JsonArray topicsArray = doc.createNestedArray("topics");
     for (int i = 0; i < 6; ++i) {
-        for (int j = 0; j < MAX_TOPIC_LENGTH; ++j) {
-            EEPROM.write(TOPIC_BASE_ADDR + i * MAX_TOPIC_LENGTH + j, j < topics[i].length() ? topics[i][j] : 0);
-        }
+        topicsArray.add(topics[i]);
     }
-    EEPROM.commit();
+
+    File configFile = LittleFS.open(CONFIG_FILE, "w");
+    if (!configFile) {
+        return false;
+    }
+
+    if (serializeJson(doc, configFile) == 0) {
+        return false;
+    }
+
+    configFile.close();
+    return true;
 }
 
-
-// Function to load Wi-Fi credentials and topics from EEPROM
-void loadCredentialsAndTopics(String& ssid, String& password, String topics[]) {
-    char ssidArr[MAX_SSID_LENGTH];
-    char passwordArr[MAX_PASSWORD_LENGTH];
-    char topicArr[6][MAX_TOPIC_LENGTH];
-
-    EEPROM.begin(EEPROM_SIZE);
-    for (int i = 0; i < MAX_SSID_LENGTH; ++i) {
-        ssidArr[i] = EEPROM.read(SSID_ADDR + i);
+// Function to load Wi-Fi credentials and topics from a JSON file
+bool loadConfig(String& ssid, String& password, String topics[]) {
+    File configFile = LittleFS.open(CONFIG_FILE, "r");
+    if (!configFile) {
+        return false;
     }
-    for (int i = 0; i < MAX_PASSWORD_LENGTH; ++i) {
-        passwordArr[i] = EEPROM.read(PASSWORD_ADDR + i);
+
+    DynamicJsonDocument doc(1024);
+    DeserializationError error = deserializeJson(doc, configFile);
+    if (error) {
+        return false;
     }
+
+    ssid = doc["ssid"].as<String>();
+    password = doc["password"].as<String>();
+
+    JsonArray topicsArray = doc["topics"];
     for (int i = 0; i < 6; ++i) {
-        for (int j = 0; j < MAX_TOPIC_LENGTH; ++j) {
-            topicArr[i][j] = EEPROM.read(TOPIC_BASE_ADDR + i * MAX_TOPIC_LENGTH + j);
-        }
-        topics[i] = String(topicArr[i]);
+        topics[i] = topicsArray[i].as<String>();
     }
-    ssid = String(ssidArr);
-    password = String(passwordArr);
+
+    configFile.close();
+    return true;
 }
 
-
-// Function to clear Wi-Fi credentials and topics from EEPROM
-void clearCredentialsAndTopics() {
-  EEPROM.begin(EEPROM_SIZE);
-  for (int i = 0; i < EEPROM_SIZE; ++i) {
-    EEPROM.write(i, 0);
-  }
-  EEPROM.commit();
+// Function to clear the configuration file
+bool clearConfig() {
+    return LittleFS.remove(CONFIG_FILE);
 }
 
 // Function to get the MAC address and format topics
 String getFormattedTopic(const String& userTopic) {
-  String macAddress2 = WiFi.macAddress();
-  Serial.print("MAC Address: ");
-  Serial.println(macAddress2);
-  return WiFi.macAddress() + "/" + userTopic;
-  
+    return WiFi.macAddress() + "/" + userTopic;
 }
 
 void setupAP() {
-  WiFi.mode(WIFI_AP);
-  WiFi.softAP("ESP8266AP", "password"); // Имя сети и пароль для точки доступа
-  Serial.print("Access Point IP: ");
-  Serial.println(WiFi.softAPIP());
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP("ESP8266AP", "password"); // Имя сети и пароль для точки доступа
+    Serial.print("Access Point IP: ");
+    Serial.println(WiFi.softAPIP());
 }
 
 void handleRoot() {
-  server.send(200, "text/html", loginForm);
+    server.send(200, "text/html", loginForm);
 }
 
 void handleLogin() {
@@ -136,7 +242,6 @@ void handleLogin() {
     // Connect to the provided Wi-Fi network
     Serial.print("Connecting to ");
     Serial.print(ssid);
-    Serial.print(password);
     WiFi.begin(ssid.c_str(), password.c_str());
     int attemptCount = 0;
     const int maxAttempts = 20;  // Максимальное количество попыток подключения
@@ -151,15 +256,18 @@ void handleLogin() {
     if (WiFi.status() == WL_CONNECTED) {
         Serial.println("\nConnected to WiFi");
 
-        // Save credentials and topics to EEPROM
-        saveCredentialsAndTopics(ssid, password, topics);
-
-        // Once connected to Wi-Fi, stop AP
-        WiFi.softAPdisconnect(true);
-        wifiConnected = true;
-        setupMQTT(topics);
-        server.send(200, "text/plain", "Successfully connected to Wi-Fi and MQTT!");
-        server.close();
+        // Save credentials and topics to JSON file
+        if (saveConfig(ssid, password, topics)) {
+            // Once connected to Wi-Fi, stop AP
+            WiFi.softAPdisconnect(true);
+            wifiConnected = true;
+            setupMQTT(topics);
+            server.send(200, "text/plain", "Successfully connected to Wi-Fi and MQTT!");
+            server.close();
+        } else {
+            Serial.println("Failed to save config");
+            server.send(500, "text/plain", "Failed to save config.");
+        }
     } else {
         Serial.println("\nFailed to connect to WiFi");
         setupAP();
@@ -167,62 +275,70 @@ void handleLogin() {
     }
 }
 
-
 void handleDownload() {
-    File file = LittleFS.open("/logs.json", "r");
-    if (!file) {
+    if (!LittleFS.exists("/logs.json")) {
         server.send(404, "text/plain", "File not found");
         return;
     }
 
-    server.streamFile(file, "application/json");
+    File file = LittleFS.open("/logs.json", "r");
+    String logs = file.readString();
     file.close();
+
+    server.send(200, "application/json", logs);
+}
+
+void handleLogsPage() {
+    server.send(200, "text/html", logsPage);
 }
 
 void setupWebServer() {
-  server.on("/", HTTP_GET, handleRoot);
-  server.on("/login", HTTP_POST, handleLogin);
-  server.on("/download", HTTP_GET, handleDownload);  // Добавить этот обработчик
-  server.begin();
-  Serial.println("HTTP server started");
+    server.on("/", HTTP_GET, handleRoot);
+    server.on("/login", HTTP_POST, handleLogin);
+    server.on("/download", HTTP_GET, handleDownload);
+    server.on("/logs", HTTP_GET, handleLogsPage);
+    server.begin();
+    Serial.println("HTTP server started");
 }
 
 void handleWebServer() {
-  server.handleClient();
+    server.handleClient();
 }
 
 bool isWiFiConnected() {
-  return WiFi.status() == WL_CONNECTED;
+    return WiFi.status() == WL_CONNECTED;
 }
 
 void reconnectWiFi() {
     if (!wifiConnected) {
         String ssid, password;
         String topics[6];
-        loadCredentialsAndTopics(ssid, password, topics);
+        if (loadConfig(ssid, password, topics)) {
+            Serial.println(ssid);
+            Serial.println(password);
+            if (ssid.length() > 0 && password.length() > 0) {
+                WiFi.begin(ssid.c_str(), password.c_str());
+                int attemptCount = 0;
+                const int maxAttempts = 20;  // Maximum connection attempts
+                const int delayTime = 1000;  // Delay between connection attempts in milliseconds
 
-        if (ssid.length() > 0 && password.length() > 0) {
-            WiFi.begin(ssid.c_str(), password.c_str());
-            int attemptCount = 0;
-            const int maxAttempts = 20;  // Maximum connection attempts
-            const int delayTime = 1000;  // Delay between connection attempts in milliseconds
+                while (WiFi.status() != WL_CONNECTED && attemptCount < maxAttempts) {
+                    delay(delayTime);
+                    Serial.print(".");
+                    attemptCount++;
+                }
 
-            while (WiFi.status() != WL_CONNECTED && attemptCount < maxAttempts) {
-                delay(delayTime);
-                Serial.print(".");
-                attemptCount++;
-            }
-
-            if (WiFi.status() == WL_CONNECTED) {
-                Serial.println("\nReconnected to WiFi");
-                wifiConnected = true;
-                setupMQTT(topics); // Pass the topics array to MQTT setup
-                return;
+                if (WiFi.status() == WL_CONNECTED) {
+                    Serial.println("\nReconnected to WiFi");
+                    wifiConnected = true;
+                    setupMQTT(topics); // Pass the topics array to MQTT setup
+                    return;
+                }
             }
         }
 
         Serial.println("\nFailed to reconnect to WiFi, setting up AP.");
-        clearCredentialsAndTopics();
+        clearConfig();
         setupAP();
         setupWebServer();
         while (!wifiConnected) {
@@ -230,7 +346,5 @@ void reconnectWiFi() {
         }
     }
 }
-
-
 
 #endif

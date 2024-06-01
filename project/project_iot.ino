@@ -1,18 +1,13 @@
 #include <SoftwareSerial.h>
 #include <TM1637Display.h>
 #include "wifi_connect.h"
-#include <EEPROM.h>
-#include <ArduinoJson.h>
-#include <FS.h>
 #include <LittleFS.h>
+#include <ArduinoJson.h>
 #include <TimeLib.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 
-// Define EEPROM addresses for storing variables
-#define EEPROM_CURRENT_PEOPLE_ADDR 0
-#define EEPROM_MAX_PEOPLE_ADDR 4
-#define EEPROM_DAILY_PEOPLE_ADDR 8
+#define CONFIG_FILE "/config.json"
 
 // Define pins for the display
 TM1637Display display(5, 4);  // D1, D2
@@ -26,7 +21,6 @@ TM1637Display display(5, 4);  // D1, D2
 int sensor1[] = {16, 0}; // D0, D3
 int sensor2[] = {14, 2}; // D5, D4
 
-// Define other constants and variables
 #define iterations 5
 #define DEFAULT_DISTANCE 100
 #define MAX_DISTANCE 300
@@ -69,51 +63,43 @@ const uint8_t done[] = {
 };
 
 const uint8_t CONN[] = {
-  SEG_G,
-  SEG_G,
-  SEG_G,
-  SEG_G
+ 0x39, // C
+    0x3F, // O
+    0x37, // N
+    0x37  // N
 };
 
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000); // 60 seconds update interval
 
+struct IoTConfig {
+    char ssid[32];
+    char password[32];
+    char topics[6][32];
+    int currentPeople;
+    int maxPeople;
+    int dailyPeople;
+};
+
+IoTConfig config;
+
 void setup() {
     Serial.begin(115200);
 
-    // Initialize LittleFS
     if (!LittleFS.begin()) {
         Serial.println("An Error has occurred while mounting LittleFS");
         return;
     }
-    
+
     display.setBrightness(7);
     display.setSegments(CONN);
 
-    // Initialize EEPROM
-    EEPROM.begin(512);
+    loadConfig();
+    validateConfig();
+    saveConfig();
 
-    // Load saved variables
-    loadVariables();
-
-    // Validate loaded variables
-    if (currentPeople < 0 || currentPeople > 10000) { // Assuming 10000 is a reasonable upper limit
-        currentPeople = 0;
-    }
-    if (maxPeople <= 0 || maxPeople > 1000) { // Assuming 1000 is a reasonable upper limit
-        maxPeople = 10;
-    }
-    if (dailyPeople < 0 || dailyPeople > 10000) { // Assuming 10000 is a reasonable upper limit
-        dailyPeople = 0;
-    }
-
-    // Save validated variables back to EEPROM
-    saveVariables();
-
-    // Attempt to reconnect to saved Wi-Fi credentials
     reconnectWiFi();
 
-    // Wait until Wi-Fi is connected
     while (!wifiConnected) {
         handleWebServer();
     }
@@ -123,7 +109,7 @@ void setup() {
         timeClient.forceUpdate();
     }
 
-    setTime(timeClient.getEpochTime()); // Set the time using the NTP client
+    setTime(timeClient.getEpochTime());
 
     display.setSegments(done);
     delay(3000);
@@ -131,66 +117,62 @@ void setup() {
     pinMode(LED_WAIT, OUTPUT);
     pinMode(LED_ENTER, OUTPUT);
     calibrateDistance();
+    printSubscribedTopics();
 }
-
 
 void loop() {
     timeClient.update();
     setTime(timeClient.getEpochTime());
-    // MQTT loop
     client.loop();
 
-    // Distance sensor 1 measurement
     unsigned long currentMillisDistance = millis();
     if (currentMillisDistance - previousMillisDistance >= interval1) {
         previousMillisDistance = currentMillisDistance;
         sensor1Val = measureDistance(sensor1);
     }
 
-    // Distance sensor 2 measurement
     currentMillisDistance = millis();
     if (currentMillisDistance - previousMillisDistance2 >= interval2) {
         previousMillisDistance2 = currentMillisDistance;
         sensor2Val = measureDistance(sensor2);
     }
 
-    // Update sequence based on sensor values
     unsigned long currentMillisSequence = millis();
     if (currentMillisSequence - previousMillisSequence >= interval3) {
         previousMillisSequence = currentMillisSequence;
         if (sensor1Val < sensor1Initial - 15 && !prevInblocked) {
             sequence += "1";
             prevInblocked = true;
-            Serial.println("Sequence updated: " + sequence);
+            // Serial.println("1");
+            // Serial.println(sensor1Val);
         } else if (sensor1Val >= sensor1Initial - 15) {
             prevInblocked = false;
         }
         if (sensor2Val < sensor2Initial - 15 && !prevOutblocked) {
             sequence += "2";
             prevOutblocked = true;
-            Serial.println("Sequence updated: " + sequence);
+            // Serial.println("2");
+            // Serial.println(sensor2Val);
         } else if (sensor2Val >= sensor2Initial - 15) {
             prevOutblocked = false;
         }
     }
 
-    // Update people count based on sequence
     if (sequence.equals("12")) {
-        currentPeople++;
+        config.currentPeople++;
         sequence = "";
-        dailyPeople++;
-        saveVariables();
-        logPeopleCountChange(currentPeople); // Log the change
-        Serial.println("Person entered, currentPeople: " + String(currentPeople));
-    } else if (sequence.equals("21") && currentPeople > 0) {
-        currentPeople--;
+        config.dailyPeople++;
+        saveConfig();
+        logPeopleCountChange(config.currentPeople);
+        Serial.println("Person entered, currentPeople: " + String(config.currentPeople));
+    } else if (sequence.equals("21") && config.currentPeople > 0) {
+        config.currentPeople--;
         sequence = "";
-        saveVariables();
-        logPeopleCountChange(currentPeople); // Log the change
-        Serial.println("Person exited, currentPeople: " + String(currentPeople));
+        saveConfig();
+        logPeopleCountChange(config.currentPeople);
+        Serial.println("Person exited, currentPeople: " + String(config.currentPeople));
     }
 
-    // Handle sequence timeout
     unsigned long currentMillisTimer = millis();
     if (currentMillisTimer - previousMillisTimer >= interval4) {
         previousMillisTimer = currentMillisSequence;
@@ -204,23 +186,21 @@ void loop() {
         }
     }
 
-    // Display and control LEDs based on people count
-    display.showNumberDec(currentPeople, false);
+    display.showNumberDec(config.currentPeople, false);
 
-    if (currentPeople < maxPeople) {
+    if (config.currentPeople < config.maxPeople) {
         digitalWrite(LED_WAIT, LOW);
         digitalWrite(LED_ENTER, HIGH);
     } else {
         digitalWrite(LED_WAIT, HIGH);
         digitalWrite(LED_ENTER, LOW);
-        if (currentPeople > maxPeople) {
+        if (config.currentPeople > config.maxPeople) {
             buzzerOn();
         } else {
             noTone(BUZZER_IN);
         }
     }
 
-    // Check Wi-Fi connection and re-setup if disconnected
     if (!isWiFiConnected()) {
         Serial.println("WiFi disconnected, setting up AP again.");
         wifiConnected = false;
@@ -230,47 +210,37 @@ void loop() {
         }
         Serial.println("Reconnected to WiFi.");
     }
+
     unsigned long pub_currentMillis = millis();
     if (pub_currentMillis - pub_previousMillis >= publish_interval) {
         pub_previousMillis = pub_currentMillis;
         publishMQTTMessages();
     }
 }
-// Function to publish MQTT messages
+
 void publishMQTTMessages() {
-    String topics[6];
-    loadTopics(topics);  // Load topics from EEPROM
-        for (int i = 0; i < 6; i++) {
-        Serial.print("Topic ");
-        Serial.print(i);
-        Serial.print(": ");
-        Serial.println(topics[i]);
-    }
-    // Publish MQTT messages
-    client.publish(topics[4].c_str(), (String(currentPeople)).c_str());
-    client.publish(topics[5].c_str(), String(dailyPeople).c_str());
+    client.publish(config.topics[4], String(config.currentPeople).c_str());
+    client.publish(config.topics[5], String(config.dailyPeople).c_str());
 }
+
 void MQTTcallback(char* topic, byte* payload, unsigned int length) {
     String topicStr(topic);
-    String topics[6];
-    loadTopics(topics);  // Load topics from EEPROM
 
     Serial.print("Message received in topic: ");
     Serial.println(topicStr);
 
-    if (topicStr == topics[0]) {
+    if (topicStr == config.topics[0]) {
         handleMaxPeople(payload, length);
-    } else if (topicStr == topics[1]) {
+    } else if (topicStr == config.topics[1]) {
         handleAlarm(payload, length);
-    } else if (topicStr == topics[2]) {
+    } else if (topicStr == config.topics[2]) {
         handleClearLogs(payload, length);
-    } else if (topicStr == topics[3]) {
+    } else if (topicStr == config.topics[3]) {
         handleClearCounters(payload, length);
-    } 
+    }
 
     Serial.println("-----------------------");
 }
-
 
 void handleMaxPeople(byte* payload, unsigned int length) {
     bool isNumeric = true;
@@ -287,10 +257,10 @@ void handleMaxPeople(byte* payload, unsigned int length) {
             message += (char)payload[i];
         }
         int newValue = message.toInt();
-        maxPeople = newValue;
+        config.maxPeople = newValue;
         Serial.print("Updated maxPeople to: ");
-        Serial.println(maxPeople);
-        saveVariables();
+        Serial.println(config.maxPeople);
+        saveConfig();
     } else {
         String message;
         for (int i = 0; i < length; i++) {
@@ -309,6 +279,10 @@ void handleAlarm(byte* payload, unsigned int length) {
         buzzerOn();
     } else if (message == "off") {
         noTone(BUZZER_IN);
+    } else if (message == "cal") {
+        calibrateDistance();
+    } else if (message == "clear") {
+        clearConfigAndRestart();
     }
     Serial.print("Message: ");
     Serial.print(message);
@@ -338,8 +312,6 @@ void handleClearCounters(byte* payload, unsigned int length) {
     }
 }
 
-
-
 void clearLogs() {
     Serial.println("clear_logs tipa");
     if (LittleFS.remove("/logs.json")) {
@@ -350,15 +322,11 @@ void clearLogs() {
 }
 
 void clearCounters() {
-    currentPeople = 0;
-    dailyPeople = 0;
-    // Обнуляем значения в EEPROM
-    EEPROM.put(EEPROM_CURRENT_PEOPLE_ADDR, currentPeople);
-    EEPROM.put(EEPROM_DAILY_PEOPLE_ADDR, dailyPeople);
-    EEPROM.commit();
+    config.currentPeople = 0;
+    config.dailyPeople = 0;
+    saveConfig();
     Serial.println("Counters cleared");
 }
-
 
 void buzzerOn() {
     unsigned long currentMillisBuzzer = millis();
@@ -408,43 +376,74 @@ void calibrateDistance() {
     }
     digitalWrite(LED_WAIT, LOW);
     digitalWrite(LED_ENTER, LOW);
+    Serial.println("calibrated koroche");
+    Serial.println(sensor1Initial);
+    Serial.println(sensor2Initial);
 }
 
-// Functions to save and load variables from EEPROM
-void saveVariables() {
-    EEPROM.put(EEPROM_CURRENT_PEOPLE_ADDR, currentPeople);
-    EEPROM.put(EEPROM_MAX_PEOPLE_ADDR, maxPeople);
-    EEPROM.put(EEPROM_DAILY_PEOPLE_ADDR, dailyPeople);
-    EEPROM.commit();
-    Serial.println("Variables saved to EEPROM");
-    Serial.print("currentPeople: ");
-    Serial.println(currentPeople);
-    Serial.print("maxPeople: ");
-    Serial.println(maxPeople);
-    Serial.print("dailyPeople: ");
-    Serial.println(dailyPeople);
+void saveConfig() {
+    File configFile = LittleFS.open(CONFIG_FILE, "w");
+    if (!configFile) {
+        Serial.println("Failed to open config file for writing");
+        return;
+    }
+
+    StaticJsonDocument<512> doc;
+    doc["ssid"] = config.ssid;
+    doc["password"] = config.password;
+    for (int i = 0; i < 6; ++i) {
+        doc["topics"][i] = config.topics[i];
+    }
+    doc["currentPeople"] = config.currentPeople;
+    doc["maxPeople"] = config.maxPeople;
+    doc["dailyPeople"] = config.dailyPeople;
+
+    if (serializeJson(doc, configFile) == 0) {
+        Serial.println("Failed to write config file");
+    }
+
+    configFile.close();
+    Serial.println("Config saved");
 }
 
+void loadConfig() {
+    File configFile = LittleFS.open(CONFIG_FILE, "r");
+    if (!configFile) {
+        Serial.println("Failed to open config file for reading");
+        return;
+    }
 
-void loadVariables() {
-    EEPROM.get(EEPROM_CURRENT_PEOPLE_ADDR, currentPeople);
-    EEPROM.get(EEPROM_MAX_PEOPLE_ADDR, maxPeople);
-    EEPROM.get(EEPROM_DAILY_PEOPLE_ADDR, dailyPeople);
+    StaticJsonDocument<512> doc;
+    DeserializationError error = deserializeJson(doc, configFile);
+    if (error) {
+        Serial.println("Failed to read config file");
+        return;
+    }
 
-    // Ensure the loaded values are valid
-    if (currentPeople < 0) currentPeople = 0;
-    if (maxPeople <= 0) maxPeople = 10;
-    if (dailyPeople < 0) dailyPeople = 0;
+    strlcpy(config.ssid, doc["ssid"] | "", sizeof(config.ssid));
+    strlcpy(config.password, doc["password"] | "", sizeof(config.password));
+    for (int i = 0; i < 6; ++i) {
+        strlcpy(config.topics[i], doc["topics"][i] | "", sizeof(config.topics[i]));
+    }
+    config.currentPeople = doc["currentPeople"] | 0;
+    config.maxPeople = doc["maxPeople"] | 10;
+    config.dailyPeople = doc["dailyPeople"] | 0;
 
-    // Debug prints
-    Serial.print("Loaded currentPeople: ");
-    Serial.println(currentPeople);
-    Serial.print("Loaded maxPeople: ");
-    Serial.println(maxPeople);
-    Serial.print("Loaded dailyPeople: ");
-    Serial.println(dailyPeople);
+    configFile.close();
+    Serial.println("Config loaded");
 }
 
+void validateConfig() {
+    if (config.currentPeople < 0 || config.currentPeople > 10000) {
+        config.currentPeople = 0;
+    }
+    if (config.maxPeople <= 0 || config.maxPeople > 1000) {
+        config.maxPeople = 10;
+    }
+    if (config.dailyPeople < 0 || config.dailyPeople > 10000) {
+        config.dailyPeople = 0;
+    }
+}
 
 void logPeopleCountChange(int peopleCount) {
     File file = LittleFS.open("/logs.json", "a");
@@ -453,34 +452,35 @@ void logPeopleCountChange(int peopleCount) {
         return;
     }
 
-    // Получаем текущее время в секундах с epoch
     time_t now = timeClient.getEpochTime();
     struct tm *timeinfo = localtime(&now);
 
-    // Форматируем строку даты и времени
     char buffer[20];
     strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", timeinfo);
 
-    // Создаем объект JSON для записи в файл
     StaticJsonDocument<200> doc;
-    doc["datetime"] = buffer; // Дата и время в человеческом формате
+    doc["datetime"] = buffer;
     doc["people_count"] = peopleCount;
 
-    // Сериализуем объект JSON и записываем в файл
     if (serializeJson(doc, file) == 0) {
         Serial.println("Failed to write to log file");
     }
 
     file.close();
 }
-void loadTopics(String topics[]) {
-    char topicArr[6][MAX_TOPIC_LENGTH];
-    
-    EEPROM.begin(EEPROM_SIZE);
+void printSubscribedTopics() {
+    Serial.println("Subscribed topics:");
     for (int i = 0; i < 6; ++i) {
-        for (int j = 0; j < MAX_TOPIC_LENGTH; ++j) {
-            topicArr[i][j] = EEPROM.read(TOPIC_BASE_ADDR + i * MAX_TOPIC_LENGTH + j);
+        if (strlen(config.topics[i]) > 0) {
+            Serial.println(config.topics[i]);
         }
-        topics[i] = String(topicArr[i]);
+    }
+}
+void clearConfigAndRestart() {
+    if (LittleFS.remove(CONFIG_FILE)) {
+        Serial.println("Config file successfully cleared, restarting...");
+        ESP.restart();
+    } else {
+        Serial.println("Failed to clear config file");
     }
 }
